@@ -35,7 +35,7 @@ func (s *AccountService) Create(ctx context.Context, householdID, userID uuid.UU
 
 	currency := req.Currency
 	if currency == "" {
-		currency = "UAH"
+		currency = "KZT"
 	}
 
 	dbAcc, err := s.queries.CreateAccount(ctx, db.CreateAccountParams{

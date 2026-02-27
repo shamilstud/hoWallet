@@ -140,12 +140,18 @@ export default function TransactionsPage() {
   const accountName = (id: string) =>
     accounts.find((a) => a.id === id)?.name || '—';
 
-  const formatAmount = (amount: string, currency = 'UAH') =>
-    new Intl.NumberFormat('uk-UA', {
-      style: 'currency',
-      currency,
-      minimumFractionDigits: 2,
-    }).format(parseFloat(amount));
+  const formatAmount = (amount: string, currency = 'KZT') => {
+    const num = parseFloat(amount);
+    try {
+      return new Intl.NumberFormat('ru-RU', {
+        style: 'currency',
+        currency,
+        minimumFractionDigits: 0,
+      }).format(num);
+    } catch {
+      return `${num.toFixed(2)} ${currency}`;
+    }
+  };
 
   const typeLabels: Record<TransactionType, string> = {
     income: 'Доход',

@@ -16,7 +16,7 @@ export default function AccountsPage() {
   const [formName, setFormName] = useState('');
   const [formType, setFormType] = useState<AccountType>('card');
   const [formBalance, setFormBalance] = useState('0');
-  const [formCurrency, setFormCurrency] = useState('UAH');
+  const [formCurrency, setFormCurrency] = useState('KZT');
   const [formError, setFormError] = useState('');
 
   useEffect(() => {
@@ -90,12 +90,18 @@ export default function AccountsPage() {
     }
   };
 
-  const formatAmount = (amount: string, currency = 'UAH') =>
-    new Intl.NumberFormat('uk-UA', {
-      style: 'currency',
-      currency,
-      minimumFractionDigits: 2,
-    }).format(parseFloat(amount));
+  const formatAmount = (amount: string, currency = 'KZT') => {
+    const num = parseFloat(amount);
+    try {
+      return new Intl.NumberFormat('ru-RU', {
+        style: 'currency',
+        currency,
+        minimumFractionDigits: 0,
+      }).format(num);
+    } catch {
+      return `${num.toFixed(2)} ${currency}`;
+    }
+  };
 
   const typeLabels: Record<AccountType, string> = {
     card: 'Карта',
@@ -175,18 +181,7 @@ export default function AccountsPage() {
                 />
               </div>
             )}
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">
-                Валюта
-              </label>
-              <input
-                type="text"
-                value={formCurrency}
-                onChange={(e) => setFormCurrency(e.target.value.toUpperCase())}
-                maxLength={3}
-                className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none"
-              />
-            </div>
+            {/* Валюта скрыта — по дефолту KZT, позже добавим выбор */}
             <div className="sm:col-span-2 flex gap-2">
               <button
                 type="submit"

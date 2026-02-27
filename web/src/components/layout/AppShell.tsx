@@ -11,8 +11,13 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const [households, setHouseholds] = useState<Household[]>([]);
   const [currentHH, setCurrentHH] = useState<string | null>(null);
+  const [mounted, setMounted] = useState(false);
+  const [isAuth, setIsAuth] = useState(false);
 
-  const isAuth = api.isAuthenticated();
+  useEffect(() => {
+    setMounted(true);
+    setIsAuth(api.isAuthenticated());
+  }, []);
 
   useEffect(() => {
     if (!isAuth) return;
@@ -41,6 +46,10 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
     api.clearTokens();
     router.push('/login');
   };
+
+  if (!mounted) {
+    return <div className="min-h-screen bg-gray-50" />;
+  }
 
   if (!isAuth) return <>{children}</>;
 

@@ -52,13 +52,17 @@ export default function DashboardPage() {
     return <div className="text-center py-20 text-gray-400">Загрузка...</div>;
   }
 
-  const formatAmount = (amount: string | number, currency = 'UAH') => {
+  const formatAmount = (amount: string | number, currency = 'KZT') => {
     const num = typeof amount === 'string' ? parseFloat(amount) : amount;
-    return new Intl.NumberFormat('uk-UA', {
-      style: 'currency',
-      currency,
-      minimumFractionDigits: 2,
-    }).format(num);
+    try {
+      return new Intl.NumberFormat('ru-RU', {
+        style: 'currency',
+        currency,
+        minimumFractionDigits: 0,
+      }).format(num);
+    } catch {
+      return `${num.toFixed(2)} ${currency}`;
+    }
   };
 
   const txnTypeLabel: Record<string, string> = {
