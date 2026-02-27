@@ -1,0 +1,69 @@
+services:
+  # ---------- PostgreSQL ----------
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${DB_NAME:-howallet}
+      POSTGRES_USER: ${DB_USER:-howallet}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-howallet_secret}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-howallet} -d ${DB_NAME:-howallet}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # ---------- Database Migrations ----------
+  migrate:
+    image: migrate/migrate:v4.17.0
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - ./migrations:/migrations
+    command:
+      [
+        "-path", "/migrations",
+        "-database", "postgres://${DB_USER:-howallet}:${DB_PASSWORD:-howallet_secret}@db:5432/${DB_NAME:-howallet}?sslmode=disable",
+        "up"
+      ]
+
+  # ---------- Go API ----------
+  api:
+    build:
+      context: .
+      dockerfile: deployments/Dockerfile.api
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    env_file:
+      - .env
+    environment:
+      DB_HOST: db
+    ports:
+      - "${API_PORT:-8080}:8080"
+
+  # ---------- Next.js Frontend ----------
+  web:
+    build:
+      context: .
+      dockerfile: deployments/Dockerfile.web
+    restart: unless-stopped
+    depends_on:
+      - api
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:${API_PORT:-8080}
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./web/src:/app/src
+
+volumes:
+  pgdata:
