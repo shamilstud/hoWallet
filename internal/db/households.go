@@ -189,3 +189,27 @@ func (q *Queries) GetInvitationByToken(ctx context.Context, token string) (Invit
 func (q *Queries) AcceptInvitation(ctx context.Context, id uuid.UUID) error {
 	return q.exec(ctx, `UPDATE invitations SET status = 'accepted' WHERE id = $1`, id)
 }
+
+func (q *Queries) ListPendingInvitations(ctx context.Context, householdID uuid.UUID) ([]Invitation, error) {
+	rows, err := q.query(ctx,
+		`SELECT id, household_id, email, invited_by, token, status, expires_at, created_at
+		 FROM invitations
+		 WHERE household_id = $1 AND status = 'pending' AND expires_at > now()
+		 ORDER BY created_at DESC`,
+		householdID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []Invitation
+	for rows.Next() {
+		var inv Invitation
+		if err := rows.Scan(&inv.ID, &inv.HouseholdID, &inv.Email, &inv.InvitedBy, &inv.Token, &inv.Status, &inv.ExpiresAt, &inv.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, inv)
+	}
+	return out, rows.Err()
+}

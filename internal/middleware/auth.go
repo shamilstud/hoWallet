@@ -82,9 +82,12 @@ func JWTAuth(cfg *config.JWTConfig) func(http.Handler) http.Handler {
 	}
 }
 
-// HouseholdCtx reads X-Household-ID header and puts it into context.
-// If the header is missing, returns 400.
-func HouseholdCtx() func(http.Handler) http.Handler {
+// MembershipChecker is a function that verifies a user belongs to a household.
+type MembershipChecker func(ctx context.Context, householdID, userID uuid.UUID) error
+
+// HouseholdCtx reads X-Household-ID header, puts it into context,
+// and verifies the authenticated user is a member of that household.
+func HouseholdCtx(checkMembership MembershipChecker) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			hhIDStr := r.Header.Get("X-Household-ID")
@@ -96,6 +99,12 @@ func HouseholdCtx() func(http.Handler) http.Handler {
 			hhID, err := uuid.Parse(hhIDStr)
 			if err != nil {
 				http.Error(w, `{"error":"invalid X-Household-ID"}`, http.StatusBadRequest)
+				return
+			}
+
+			userID := UserIDFromCtx(r.Context())
+			if err := checkMembership(r.Context(), hhID, userID); err != nil {
+				http.Error(w, `{"error":"not a member of this household"}`, http.StatusForbidden)
 				return
 			}
 

@@ -12,12 +12,11 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/crypto/bcrypt"
 
 	"github.com/howallet/howallet/internal/config"
-	db "github.com/howallet/howallet/internal/db"
 	"github.com/howallet/howallet/internal/model"
+	"github.com/howallet/howallet/internal/repository/postgres"
 )
 
 var (
@@ -27,19 +26,18 @@ var (
 )
 
 type AuthService struct {
-	queries *db.Queries
-	pool    *pgxpool.Pool
-	jwt     *config.JWTConfig
+	repos *postgres.Repos
+	jwt   *config.JWTConfig
 }
 
-func NewAuthService(pool *pgxpool.Pool, queries *db.Queries, jwtCfg *config.JWTConfig) *AuthService {
-	return &AuthService{queries: queries, pool: pool, jwt: jwtCfg}
+func NewAuthService(repos *postgres.Repos, jwtCfg *config.JWTConfig) *AuthService {
+	return &AuthService{repos: repos, jwt: jwtCfg}
 }
 
 // Register creates a new user, a default household, and returns tokens.
 func (s *AuthService) Register(ctx context.Context, req model.RegisterRequest) (*model.AuthResponse, error) {
 	// Check if email is taken
-	_, err := s.queries.GetUserByEmail(ctx, req.Email)
+	_, err := s.repos.Users.GetByEmail(ctx, req.Email)
 	if err == nil {
 		return nil, ErrEmailTaken
 	}
@@ -53,55 +51,39 @@ func (s *AuthService) Register(ctx context.Context, req model.RegisterRequest) (
 		return nil, fmt.Errorf("hash password: %w", err)
 	}
 
-	// Use a DB transaction for atomicity
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("begin tx: %w", err)
-	}
-	defer tx.Rollback(ctx)
+	var user model.User
+	err = s.repos.RunInTx(ctx, func(txCtx context.Context) error {
+		txRepos := postgres.TxReposFromCtx(txCtx)
 
-	qtx := s.queries.WithTx(tx)
+		var txErr error
+		user, txErr = txRepos.Users.Create(txCtx, req.Email, string(hash), req.Name)
+		if txErr != nil {
+			return fmt.Errorf("create user: %w", txErr)
+		}
 
-	// Create user
-	dbUser, err := qtx.CreateUser(ctx, db.CreateUserParams{
-		Email:        req.Email,
-		PasswordHash: string(hash),
-		Name:         req.Name,
+		hh, txErr := txRepos.Households.Create(txCtx, req.Name+"'s Wallet", user.ID)
+		if txErr != nil {
+			return fmt.Errorf("create household: %w", txErr)
+		}
+
+		txErr = txRepos.Households.AddMember(txCtx, hh.ID, user.ID, model.HouseholdRoleOwner)
+		if txErr != nil {
+			return fmt.Errorf("add household member: %w", txErr)
+		}
+
+		return nil
 	})
-	if err != nil {
-		return nil, fmt.Errorf("create user: %w", err)
-	}
-
-	// Create default household
-	hh, err := qtx.CreateHousehold(ctx, db.CreateHouseholdParams{
-		Name:    req.Name + "'s Wallet",
-		OwnerID: dbUser.ID,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("create household: %w", err)
-	}
-
-	// Add user as owner
-	err = qtx.AddHouseholdMember(ctx, db.AddHouseholdMemberParams{
-		HouseholdID: hh.ID,
-		UserID:      dbUser.ID,
-		Role:        db.HouseholdRoleOwner,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("add household member: %w", err)
-	}
-
-	if err := tx.Commit(ctx); err != nil {
-		return nil, fmt.Errorf("commit: %w", err)
-	}
-
-	// Generate tokens
-	accessToken, err := s.generateAccessToken(dbUser.ID, dbUser.Email)
 	if err != nil {
 		return nil, err
 	}
 
-	refreshToken, err := s.generateAndStoreRefreshToken(ctx, dbUser.ID)
+	// Generate tokens
+	accessToken, err := s.generateAccessToken(user.ID, user.Email)
+	if err != nil {
+		return nil, err
+	}
+
+	refreshToken, err := s.generateAndStoreRefreshToken(ctx, user.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -109,13 +91,13 @@ func (s *AuthService) Register(ctx context.Context, req model.RegisterRequest) (
 	return &model.AuthResponse{
 		AccessToken:  accessToken,
 		RefreshToken: refreshToken,
-		User:         toUserModel(dbUser),
+		User:         user,
 	}, nil
 }
 
 // Login authenticates a user and returns tokens.
 func (s *AuthService) Login(ctx context.Context, req model.LoginRequest) (*model.AuthResponse, error) {
-	dbUser, err := s.queries.GetUserByEmail(ctx, req.Email)
+	user, err := s.repos.Users.GetByEmail(ctx, req.Email)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrInvalidCredentials
@@ -123,16 +105,16 @@ func (s *AuthService) Login(ctx context.Context, req model.LoginRequest) (*model
 		return nil, fmt.Errorf("get user: %w", err)
 	}
 
-	if err := bcrypt.CompareHashAndPassword([]byte(dbUser.PasswordHash), []byte(req.Password)); err != nil {
+	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(req.Password)); err != nil {
 		return nil, ErrInvalidCredentials
 	}
 
-	accessToken, err := s.generateAccessToken(dbUser.ID, dbUser.Email)
+	accessToken, err := s.generateAccessToken(user.ID, user.Email)
 	if err != nil {
 		return nil, err
 	}
 
-	refreshToken, err := s.generateAndStoreRefreshToken(ctx, dbUser.ID)
+	refreshToken, err := s.generateAndStoreRefreshToken(ctx, user.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -140,28 +122,28 @@ func (s *AuthService) Login(ctx context.Context, req model.LoginRequest) (*model
 	return &model.AuthResponse{
 		AccessToken:  accessToken,
 		RefreshToken: refreshToken,
-		User:         toUserModel(dbUser),
+		User:         user,
 	}, nil
 }
 
 // Refresh validates a refresh token and issues a new access + refresh pair.
 func (s *AuthService) Refresh(ctx context.Context, rawToken string) (*model.AuthResponse, error) {
-	hash := hashToken(rawToken)
+	h := hashToken(rawToken)
 
-	rt, err := s.queries.GetRefreshToken(ctx, hash)
+	rt, err := s.repos.RefreshTokens.GetByHash(ctx, h)
 	if err != nil {
 		return nil, ErrInvalidToken
 	}
 
-	if rt.ExpiresAt.Time.Before(time.Now()) {
-		_ = s.queries.DeleteRefreshToken(ctx, hash)
+	if rt.ExpiresAt.Before(time.Now()) {
+		_ = s.repos.RefreshTokens.Delete(ctx, h)
 		return nil, ErrInvalidToken
 	}
 
 	// Delete the old refresh token (rotation)
-	_ = s.queries.DeleteRefreshToken(ctx, hash)
+	_ = s.repos.RefreshTokens.Delete(ctx, h)
 
-	user, err := s.queries.GetUserByID(ctx, rt.UserID)
+	user, err := s.repos.Users.GetByID(ctx, rt.UserID)
 	if err != nil {
 		return nil, fmt.Errorf("get user: %w", err)
 	}
@@ -179,13 +161,13 @@ func (s *AuthService) Refresh(ctx context.Context, rawToken string) (*model.Auth
 	return &model.AuthResponse{
 		AccessToken:  accessToken,
 		RefreshToken: newRefresh,
-		User:         toUserModel(user),
+		User:         user,
 	}, nil
 }
 
 // Logout deletes all refresh tokens for the user.
 func (s *AuthService) Logout(ctx context.Context, userID uuid.UUID) error {
-	return s.queries.DeleteUserRefreshTokens(ctx, userID)
+	return s.repos.RefreshTokens.DeleteByUser(ctx, userID)
 }
 
 // --- token helpers ---
@@ -204,13 +186,9 @@ func (s *AuthService) generateAccessToken(userID uuid.UUID, email string) (strin
 
 func (s *AuthService) generateAndStoreRefreshToken(ctx context.Context, userID uuid.UUID) (string, error) {
 	raw := generateRandomToken(32)
-	hash := hashToken(raw)
+	h := hashToken(raw)
 
-	err := s.queries.CreateRefreshToken(ctx, db.CreateRefreshTokenParams{
-		UserID:    userID,
-		TokenHash: hash,
-		ExpiresAt: time.Now().Add(s.jwt.RefreshTTL),
-	})
+	err := s.repos.RefreshTokens.Create(ctx, userID, h, time.Now().Add(s.jwt.RefreshTTL))
 	if err != nil {
 		return "", fmt.Errorf("store refresh token: %w", err)
 	}
@@ -220,21 +198,13 @@ func (s *AuthService) generateAndStoreRefreshToken(ctx context.Context, userID u
 
 func generateRandomToken(n int) string {
 	b := make([]byte, n)
-	_, _ = rand.Read(b)
+	if _, err := rand.Read(b); err != nil {
+		panic(fmt.Sprintf("crypto/rand.Read failed: %v", err))
+	}
 	return hex.EncodeToString(b)
 }
 
 func hashToken(token string) string {
-	h := sha256.Sum256([]byte(token))
-	return hex.EncodeToString(h[:])
-}
-
-func toUserModel(u db.User) model.User {
-	return model.User{
-		ID:        u.ID,
-		Email:     u.Email,
-		Name:      u.Name,
-		CreatedAt: u.CreatedAt.Time,
-		UpdatedAt: u.UpdatedAt.Time,
-	}
+	sum := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(sum[:])
 }

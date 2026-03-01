@@ -170,6 +170,12 @@ class ApiClient {
     );
   }
 
+  listPendingInvitations(householdId: string) {
+    return this.request<import('../types').Invitation[]>(
+      `/api/households/${householdId}/invitations`
+    );
+  }
+
   removeMember(householdId: string, userId: string) {
     return this.request<{ message: string }>(
       `/api/households/${householdId}/members/${userId}`,

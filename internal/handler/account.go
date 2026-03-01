@@ -14,11 +14,10 @@ import (
 
 type AccountHandler struct {
 	accSvc *service.AccountService
-	hhSvc  *service.HouseholdService
 }
 
-func NewAccountHandler(accSvc *service.AccountService, hhSvc *service.HouseholdService) *AccountHandler {
-	return &AccountHandler{accSvc: accSvc, hhSvc: hhSvc}
+func NewAccountHandler(accSvc *service.AccountService) *AccountHandler {
+	return &AccountHandler{accSvc: accSvc}
 }
 
 // POST /api/accounts
@@ -36,11 +35,6 @@ func (h *AccountHandler) Create(w http.ResponseWriter, r *http.Request) {
 	userID := middleware.UserIDFromCtx(r.Context())
 	hhID := middleware.HouseholdIDFromCtx(r.Context())
 
-	if err := h.hhSvc.CheckMembership(r.Context(), hhID, userID); err != nil {
-		ErrorJSON(w, http.StatusForbidden, "not a member of this household")
-		return
-	}
-
 	acc, err := h.accSvc.Create(r.Context(), hhID, userID, req)
 	if err != nil {
 		ErrorJSON(w, http.StatusInternalServerError, "failed to create account")
@@ -51,13 +45,7 @@ func (h *AccountHandler) Create(w http.ResponseWriter, r *http.Request) {
 
 // GET /api/accounts
 func (h *AccountHandler) List(w http.ResponseWriter, r *http.Request) {
-	userID := middleware.UserIDFromCtx(r.Context())
 	hhID := middleware.HouseholdIDFromCtx(r.Context())
-
-	if err := h.hhSvc.CheckMembership(r.Context(), hhID, userID); err != nil {
-		ErrorJSON(w, http.StatusForbidden, "not a member of this household")
-		return
-	}
 
 	accounts, err := h.accSvc.List(r.Context(), hhID)
 	if err != nil {

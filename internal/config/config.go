@@ -11,6 +11,7 @@ type Config struct {
 	DB       DBConfig
 	API      APIConfig
 	JWT      JWTConfig
+	SMTP     SMTPConfig
 	Frontend FrontendConfig
 	Env      string
 }
@@ -50,6 +51,14 @@ type FrontendConfig struct {
 	URL string
 }
 
+type SMTPConfig struct {
+	Host     string
+	Port     string
+	User     string
+	Password string
+	From     string
+}
+
 // Load reads configuration from environment variables with sensible defaults.
 func Load() (*Config, error) {
 	accessTTL, err := time.ParseDuration(getEnv("JWT_ACCESS_TTL", "15m"))
@@ -82,6 +91,13 @@ func Load() (*Config, error) {
 		},
 		Frontend: FrontendConfig{
 			URL: getEnv("FRONTEND_URL", "http://localhost:3000"),
+		},
+		SMTP: SMTPConfig{
+			Host:     getEnv("SMTP_HOST", ""),
+			Port:     getEnv("SMTP_PORT", "587"),
+			User:     getEnv("SMTP_USER", ""),
+			Password: getEnv("SMTP_PASSWORD", ""),
+			From:     getEnv("SMTP_FROM", ""),
 		},
 		Env: getEnv("ENV", "development"),
 	}

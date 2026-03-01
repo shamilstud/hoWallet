@@ -10,10 +10,9 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 
-	db "github.com/howallet/howallet/internal/db"
 	"github.com/howallet/howallet/internal/model"
+	"github.com/howallet/howallet/internal/repository/postgres"
 )
 
 var (
@@ -25,129 +24,89 @@ var (
 )
 
 type HouseholdService struct {
-	queries *db.Queries
-	pool    *pgxpool.Pool
+	repos       *postgres.Repos
+	emailSvc    *EmailService
+	frontendURL string
 }
 
-func NewHouseholdService(pool *pgxpool.Pool, queries *db.Queries) *HouseholdService {
-	return &HouseholdService{queries: queries, pool: pool}
+func NewHouseholdService(repos *postgres.Repos, emailSvc *EmailService, frontendURL string) *HouseholdService {
+	return &HouseholdService{repos: repos, emailSvc: emailSvc, frontendURL: frontendURL}
 }
 
 func (s *HouseholdService) Create(ctx context.Context, userID uuid.UUID, req model.CreateHouseholdRequest) (*model.Household, error) {
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("begin tx: %w", err)
-	}
-	defer tx.Rollback(ctx)
+	var hh model.Household
+	err := s.repos.RunInTx(ctx, func(txCtx context.Context) error {
+		txRepos := postgres.TxReposFromCtx(txCtx)
 
-	qtx := s.queries.WithTx(tx)
+		var txErr error
+		hh, txErr = txRepos.Households.Create(txCtx, req.Name, userID)
+		if txErr != nil {
+			return fmt.Errorf("create household: %w", txErr)
+		}
 
-	hh, err := qtx.CreateHousehold(ctx, db.CreateHouseholdParams{
-		Name:    req.Name,
-		OwnerID: userID,
+		txErr = txRepos.Households.AddMember(txCtx, hh.ID, userID, model.HouseholdRoleOwner)
+		if txErr != nil {
+			return fmt.Errorf("add owner: %w", txErr)
+		}
+		return nil
 	})
 	if err != nil {
-		return nil, fmt.Errorf("create household: %w", err)
+		return nil, err
 	}
-
-	err = qtx.AddHouseholdMember(ctx, db.AddHouseholdMemberParams{
-		HouseholdID: hh.ID,
-		UserID:      userID,
-		Role:        db.HouseholdRoleOwner,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("add owner: %w", err)
-	}
-
-	if err := tx.Commit(ctx); err != nil {
-		return nil, fmt.Errorf("commit: %w", err)
-	}
-
-	result := toHouseholdModel(hh)
-	return &result, nil
+	return &hh, nil
 }
 
 func (s *HouseholdService) List(ctx context.Context, userID uuid.UUID) ([]model.Household, error) {
-	rows, err := s.queries.ListUserHouseholds(ctx, userID)
+	list, err := s.repos.Households.ListByUser(ctx, userID)
 	if err != nil {
 		return nil, fmt.Errorf("list households: %w", err)
 	}
-
-	out := make([]model.Household, 0, len(rows))
-	for _, r := range rows {
-		out = append(out, toHouseholdModel(r))
-	}
-	return out, nil
+	return list, nil
 }
 
 func (s *HouseholdService) Get(ctx context.Context, id uuid.UUID) (*model.Household, error) {
-	hh, err := s.queries.GetHousehold(ctx, id)
+	hh, err := s.repos.Households.GetByID(ctx, id)
 	if err != nil {
 		return nil, ErrHouseholdNotFound
 	}
-	result := toHouseholdModel(hh)
-	return &result, nil
+	return &hh, nil
 }
 
 func (s *HouseholdService) ListMembers(ctx context.Context, householdID uuid.UUID) ([]model.HouseholdMember, error) {
-	rows, err := s.queries.ListHouseholdMembers(ctx, householdID)
+	members, err := s.repos.Households.ListMembers(ctx, householdID)
 	if err != nil {
 		return nil, fmt.Errorf("list members: %w", err)
-	}
-
-	members := make([]model.HouseholdMember, 0, len(rows))
-	for _, r := range rows {
-		members = append(members, model.HouseholdMember{
-			HouseholdID: r.HouseholdID,
-			UserID:      r.UserID,
-			Role:        model.HouseholdRole(r.Role),
-			JoinedAt:    r.JoinedAt,
-			Email:       r.Email,
-			UserName:    r.UserName,
-		})
 	}
 	return members, nil
 }
 
 func (s *HouseholdService) RemoveMember(ctx context.Context, householdID, ownerID, targetUserID uuid.UUID) error {
-	member, err := s.queries.GetHouseholdMember(ctx, db.GetHouseholdMemberParams{
-		HouseholdID: householdID,
-		UserID:      ownerID,
-	})
+	member, err := s.repos.Households.GetMember(ctx, householdID, ownerID)
 	if err != nil {
 		return ErrNotMember
 	}
-	if member.Role != db.HouseholdRoleOwner {
+	if member.Role != model.HouseholdRoleOwner {
 		return ErrNotHouseholdOwner
 	}
 
-	return s.queries.RemoveHouseholdMember(ctx, db.RemoveHouseholdMemberParams{
-		HouseholdID: householdID,
-		UserID:      targetUserID,
-	})
+	return s.repos.Households.RemoveMember(ctx, householdID, targetUserID)
 }
 
 // Invite creates an invitation token for the given email.
 func (s *HouseholdService) Invite(ctx context.Context, householdID, inviterID uuid.UUID, email string) (*model.Invitation, error) {
 	// Verify inviter is owner
-	member, err := s.queries.GetHouseholdMember(ctx, db.GetHouseholdMemberParams{
-		HouseholdID: householdID,
-		UserID:      inviterID,
-	})
+	member, err := s.repos.Households.GetMember(ctx, householdID, inviterID)
 	if err != nil {
 		return nil, ErrNotMember
 	}
-	if member.Role != db.HouseholdRoleOwner {
+	if member.Role != model.HouseholdRoleOwner {
 		return nil, ErrNotHouseholdOwner
 	}
 
 	// Check if already a member
-	existingUser, err := s.queries.GetUserByEmail(ctx, email)
+	existingUser, err := s.repos.Users.GetByEmail(ctx, email)
 	if err == nil {
-		isMember, _ := s.queries.IsHouseholdMember(ctx, db.IsHouseholdMemberParams{
-			HouseholdID: householdID,
-			UserID:      existingUser.ID,
-		})
+		isMember, _ := s.repos.Households.IsMember(ctx, householdID, existingUser.ID)
 		if isMember {
 			return nil, ErrAlreadyMember
 		}
@@ -155,27 +114,33 @@ func (s *HouseholdService) Invite(ctx context.Context, householdID, inviterID uu
 
 	// Generate token
 	tokenBytes := make([]byte, 32)
-	_, _ = rand.Read(tokenBytes)
+	if _, err := rand.Read(tokenBytes); err != nil {
+		return nil, fmt.Errorf("generate token: %w", err)
+	}
 	token := hex.EncodeToString(tokenBytes)
 
-	inv, err := s.queries.CreateInvitation(ctx, db.CreateInvitationParams{
-		HouseholdID: householdID,
-		Email:       email,
-		InvitedBy:   inviterID,
-		Token:       token,
-		ExpiresAt:   time.Now().Add(7 * 24 * time.Hour),
-	})
+	inv, err := s.repos.Invitations.Create(ctx, householdID, inviterID, email, token, time.Now().Add(7*24*time.Hour))
 	if err != nil {
 		return nil, fmt.Errorf("create invitation: %w", err)
 	}
 
-	result := toInvitationModel(inv)
-	return &result, nil
+	// Send invitation email (best-effort: don't fail the invite if email fails)
+	if s.emailSvc != nil && s.emailSvc.cfg.Host != "" {
+		hh, _ := s.repos.Households.GetByID(ctx, householdID)
+		inviter, _ := s.repos.Users.GetByID(ctx, inviterID)
+		inviterName := "A hoWallet user"
+		if inviter.Name != "" {
+			inviterName = inviter.Name
+		}
+		_ = s.emailSvc.SendInvitation(email, hh.Name, inviterName, token, s.frontendURL)
+	}
+
+	return &inv, nil
 }
 
 // AcceptInvitation accepts an invitation token and adds the user to the household.
 func (s *HouseholdService) AcceptInvitation(ctx context.Context, token string, userID uuid.UUID) error {
-	inv, err := s.queries.GetInvitationByToken(ctx, token)
+	inv, err := s.repos.Invitations.GetByToken(ctx, token)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ErrInvitationInvalid
@@ -183,44 +148,31 @@ func (s *HouseholdService) AcceptInvitation(ctx context.Context, token string, u
 		return fmt.Errorf("get invitation: %w", err)
 	}
 
-	if inv.Status != db.InvitationStatusPending {
+	if inv.Status != model.InvitationStatusPending {
 		return ErrInvitationInvalid
 	}
-	if inv.ExpiresAt.Time.Before(time.Now()) {
+	if inv.ExpiresAt.Before(time.Now()) {
 		return ErrInvitationInvalid
 	}
 
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return fmt.Errorf("begin tx: %w", err)
-	}
-	defer tx.Rollback(ctx)
+	return s.repos.RunInTx(ctx, func(txCtx context.Context) error {
+		txRepos := postgres.TxReposFromCtx(txCtx)
 
-	qtx := s.queries.WithTx(tx)
+		if err := txRepos.Households.AddMember(txCtx, inv.HouseholdID, userID, model.HouseholdRoleMember); err != nil {
+			return fmt.Errorf("add member: %w", err)
+		}
 
-	err = qtx.AddHouseholdMember(ctx, db.AddHouseholdMemberParams{
-		HouseholdID: inv.HouseholdID,
-		UserID:      userID,
-		Role:        db.HouseholdRoleMember,
+		if err := txRepos.Invitations.Accept(txCtx, inv.ID); err != nil {
+			return fmt.Errorf("accept invitation: %w", err)
+		}
+
+		return nil
 	})
-	if err != nil {
-		return fmt.Errorf("add member: %w", err)
-	}
-
-	err = qtx.AcceptInvitation(ctx, inv.ID)
-	if err != nil {
-		return fmt.Errorf("accept invitation: %w", err)
-	}
-
-	return tx.Commit(ctx)
 }
 
 // CheckMembership verifies the user is a member of the household.
 func (s *HouseholdService) CheckMembership(ctx context.Context, householdID, userID uuid.UUID) error {
-	isMember, err := s.queries.IsHouseholdMember(ctx, db.IsHouseholdMemberParams{
-		HouseholdID: householdID,
-		UserID:      userID,
-	})
+	isMember, err := s.repos.Households.IsMember(ctx, householdID, userID)
 	if err != nil {
 		return fmt.Errorf("check membership: %w", err)
 	}
@@ -230,24 +182,7 @@ func (s *HouseholdService) CheckMembership(ctx context.Context, householdID, use
 	return nil
 }
 
-func toHouseholdModel(h db.Household) model.Household {
-	return model.Household{
-		ID:        h.ID,
-		Name:      h.Name,
-		OwnerID:   h.OwnerID,
-		CreatedAt: h.CreatedAt.Time,
-	}
-}
-
-func toInvitationModel(i db.Invitation) model.Invitation {
-	return model.Invitation{
-		ID:          i.ID,
-		HouseholdID: i.HouseholdID,
-		Email:       i.Email,
-		InvitedBy:   i.InvitedBy,
-		Token:       i.Token,
-		Status:      model.InvitationStatus(i.Status),
-		ExpiresAt:   i.ExpiresAt.Time,
-		CreatedAt:   i.CreatedAt.Time,
-	}
+// ListPendingInvitations returns pending invitations for a household.
+func (s *HouseholdService) ListPendingInvitations(ctx context.Context, householdID uuid.UUID) ([]model.Invitation, error) {
+	return s.repos.Invitations.ListPendingByHousehold(ctx, householdID)
 }

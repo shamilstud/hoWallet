@@ -4,16 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"time"
 
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgtype"
-	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/shopspring/decimal"
 
-	db "github.com/howallet/howallet/internal/db"
 	"github.com/howallet/howallet/internal/model"
+	"github.com/howallet/howallet/internal/repository"
+	"github.com/howallet/howallet/internal/repository/postgres"
 )
 
 var (
@@ -22,12 +19,11 @@ var (
 )
 
 type TransactionService struct {
-	queries *db.Queries
-	pool    *pgxpool.Pool
+	repos *postgres.Repos
 }
 
-func NewTransactionService(pool *pgxpool.Pool, queries *db.Queries) *TransactionService {
-	return &TransactionService{queries: queries, pool: pool}
+func NewTransactionService(repos *postgres.Repos) *TransactionService {
+	return &TransactionService{repos: repos}
 }
 
 // Create creates a transaction and updates account balances atomically.
@@ -41,52 +37,38 @@ func (s *TransactionService) Create(ctx context.Context, householdID, userID uui
 		return nil, ErrTransferMissingDest
 	}
 
-	tx, err := s.pool.Begin(ctx)
+	tags := req.Tags
+	if tags == nil {
+		tags = []string{}
+	}
+
+	var txn model.Transaction
+	err = s.repos.RunInTx(ctx, func(txCtx context.Context) error {
+		txRepos := postgres.TxReposFromCtx(txCtx)
+
+		var txErr error
+		txn, txErr = txRepos.Transactions.Create(txCtx, repository.CreateTransactionParams{
+			HouseholdID:          householdID,
+			Type:                 req.Type,
+			Description:          req.Description,
+			Amount:               amount,
+			AccountID:            req.AccountID,
+			DestinationAccountID: req.DestinationAccountID,
+			Tags:                 tags,
+			Note:                 req.Note,
+			TransactedAt:         req.TransactedAt,
+			CreatedBy:            userID,
+		})
+		if txErr != nil {
+			return fmt.Errorf("create transaction: %w", txErr)
+		}
+
+		return applyBalanceChange(txCtx, txRepos.Accounts, req.Type, amount, req.AccountID, req.DestinationAccountID)
+	})
 	if err != nil {
-		return nil, fmt.Errorf("begin tx: %w", err)
-	}
-	defer tx.Rollback(ctx)
-
-	qtx := s.queries.WithTx(tx)
-
-	var destID *uuid.UUID
-	if req.DestinationAccountID != nil {
-		destID = req.DestinationAccountID
-	}
-
-	params := db.CreateTransactionParams{
-		HouseholdID: householdID,
-		Type:        db.TransactionType(req.Type),
-		Description: req.Description,
-		Amount:      amount,
-		AccountID:   req.AccountID,
-		Tags:        req.Tags,
-		Note:        toPgText(req.Note),
-		TransactedAt: pgtype.Timestamptz{
-			Time:  req.TransactedAt,
-			Valid: true,
-		},
-		CreatedBy: userID,
-	}
-	if destID != nil {
-		params.DestinationAccountID = toNullUUID(destID)
-	}
-
-	dbTxn, err := qtx.CreateTransaction(ctx, params)
-	if err != nil {
-		return nil, fmt.Errorf("create transaction: %w", err)
-	}
-
-	// Update balances
-	if err := s.applyBalanceChange(ctx, qtx, req.Type, amount, req.AccountID, destID); err != nil {
 		return nil, err
 	}
 
-	if err := tx.Commit(ctx); err != nil {
-		return nil, fmt.Errorf("commit: %w", err)
-	}
-
-	txn := toTransactionModel(dbTxn)
 	return &txn, nil
 }
 
@@ -96,40 +78,30 @@ func (s *TransactionService) List(ctx context.Context, householdID uuid.UUID, q 
 		q.Limit = 50
 	}
 
-	params := db.ListTransactionsParams{
+	params := repository.ListTransactionsParams{
 		HouseholdID: householdID,
-		Column2:     toPgTimestamptz(q.From),
-		Column3:     toPgTimestamptz(q.To),
+		From:        q.From,
+		To:          q.To,
+		Type:        q.Type,
+		AccountID:   q.AccountID,
 		Limit:       q.Limit,
 		Offset:      q.Offset,
 	}
-	if q.Type != nil {
-		params.Column4 = toNullTxnType(q.Type)
-	}
-	if q.AccountID != nil {
-		params.Column5 = toNullUUID(q.AccountID)
-	}
 
-	rows, err := s.queries.ListTransactions(ctx, params)
+	txns, err := s.repos.Transactions.List(ctx, params)
 	if err != nil {
 		return nil, fmt.Errorf("list transactions: %w", err)
 	}
 
-	countParams := db.CountTransactionsParams{
+	total, err := s.repos.Transactions.Count(ctx, repository.CountTransactionsParams{
 		HouseholdID: householdID,
-		Column2:     params.Column2,
-		Column3:     params.Column3,
-		Column4:     params.Column4,
-		Column5:     params.Column5,
-	}
-	total, err := s.queries.CountTransactions(ctx, countParams)
+		From:        q.From,
+		To:          q.To,
+		Type:        q.Type,
+		AccountID:   q.AccountID,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("count transactions: %w", err)
-	}
-
-	txns := make([]model.Transaction, 0, len(rows))
-	for _, r := range rows {
-		txns = append(txns, toTransactionModel(r))
 	}
 
 	return &model.PaginatedResponse{
@@ -142,17 +114,10 @@ func (s *TransactionService) List(ctx context.Context, householdID uuid.UUID, q 
 
 // Get returns a single transaction.
 func (s *TransactionService) Get(ctx context.Context, id, householdID uuid.UUID) (*model.Transaction, error) {
-	dbTxn, err := s.queries.GetTransaction(ctx, db.GetTransactionParams{
-		ID:          id,
-		HouseholdID: householdID,
-	})
+	txn, err := s.repos.Transactions.GetByID(ctx, id, householdID)
 	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, ErrTransactionNotFound
-		}
-		return nil, fmt.Errorf("get transaction: %w", err)
+		return nil, ErrTransactionNotFound
 	}
-	txn := toTransactionModel(dbTxn)
 	return &txn, nil
 }
 
@@ -167,179 +132,101 @@ func (s *TransactionService) Update(ctx context.Context, id, householdID, userID
 		return nil, ErrTransferMissingDest
 	}
 
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("begin tx: %w", err)
-	}
-	defer tx.Rollback(ctx)
-
-	qtx := s.queries.WithTx(tx)
-
-	// Get old transaction to reverse balance
-	old, err := qtx.GetTransaction(ctx, db.GetTransactionParams{ID: id, HouseholdID: householdID})
-	if err != nil {
-		return nil, ErrTransactionNotFound
+	tags := req.Tags
+	if tags == nil {
+		tags = []string{}
 	}
 
-	// Reverse old balance
-	oldDestID := nullUUIDToPtr(old.DestinationAccountID)
-	if err := s.reverseBalanceChange(ctx, qtx, model.TransactionType(old.Type), old.Amount, old.AccountID, oldDestID); err != nil {
+	var txn model.Transaction
+	err = s.repos.RunInTx(ctx, func(txCtx context.Context) error {
+		txRepos := postgres.TxReposFromCtx(txCtx)
+
+		// Get old transaction to reverse balance
+		old, txErr := txRepos.Transactions.GetByID(txCtx, id, householdID)
+		if txErr != nil {
+			return ErrTransactionNotFound
+		}
+
+		// Reverse old balance
+		if txErr = reverseBalanceChange(txCtx, txRepos.Accounts, old.Type, old.Amount, old.AccountID, old.DestinationAccountID); txErr != nil {
+			return txErr
+		}
+
+		// Update transaction
+		txn, txErr = txRepos.Transactions.Update(txCtx, repository.UpdateTransactionParams{
+			ID:                   id,
+			HouseholdID:          householdID,
+			Type:                 req.Type,
+			Description:          req.Description,
+			Amount:               newAmount,
+			AccountID:            req.AccountID,
+			DestinationAccountID: req.DestinationAccountID,
+			Tags:                 tags,
+			Note:                 req.Note,
+			TransactedAt:         req.TransactedAt,
+		})
+		if txErr != nil {
+			return fmt.Errorf("update transaction: %w", txErr)
+		}
+
+		// Apply new balance
+		return applyBalanceChange(txCtx, txRepos.Accounts, req.Type, newAmount, req.AccountID, req.DestinationAccountID)
+	})
+	if err != nil {
 		return nil, err
 	}
 
-	// Update transaction
-	params := db.UpdateTransactionParams{
-		ID:          id,
-		HouseholdID: householdID,
-		Description: req.Description,
-		Amount:      newAmount,
-		AccountID:   req.AccountID,
-		Tags:        req.Tags,
-		Note:        toPgText(req.Note),
-		TransactedAt: pgtype.Timestamptz{
-			Time:  req.TransactedAt,
-			Valid: true,
-		},
-		Type: db.TransactionType(req.Type),
-	}
-	if req.DestinationAccountID != nil {
-		params.DestinationAccountID = toNullUUID(req.DestinationAccountID)
-	}
-
-	dbTxn, err := qtx.UpdateTransaction(ctx, params)
-	if err != nil {
-		return nil, fmt.Errorf("update transaction: %w", err)
-	}
-
-	// Apply new balance
-	if err := s.applyBalanceChange(ctx, qtx, req.Type, newAmount, req.AccountID, req.DestinationAccountID); err != nil {
-		return nil, err
-	}
-
-	if err := tx.Commit(ctx); err != nil {
-		return nil, fmt.Errorf("commit: %w", err)
-	}
-
-	txn := toTransactionModel(dbTxn)
 	return &txn, nil
 }
 
 // Delete removes a transaction and reverses its balance effect.
 func (s *TransactionService) Delete(ctx context.Context, id, householdID uuid.UUID) error {
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return fmt.Errorf("begin tx: %w", err)
-	}
-	defer tx.Rollback(ctx)
+	return s.repos.RunInTx(ctx, func(txCtx context.Context) error {
+		txRepos := postgres.TxReposFromCtx(txCtx)
 
-	qtx := s.queries.WithTx(tx)
+		deleted, err := txRepos.Transactions.Delete(txCtx, id, householdID)
+		if err != nil {
+			return ErrTransactionNotFound
+		}
 
-	deleted, err := qtx.DeleteTransaction(ctx, db.DeleteTransactionParams{ID: id, HouseholdID: householdID})
-	if err != nil {
-		return ErrTransactionNotFound
-	}
-
-	destID := nullUUIDToPtr(deleted.DestinationAccountID)
-	if err := s.reverseBalanceChange(ctx, qtx, model.TransactionType(deleted.Type), deleted.Amount, deleted.AccountID, destID); err != nil {
-		return err
-	}
-
-	return tx.Commit(ctx)
+		return reverseBalanceChange(txCtx, txRepos.Accounts, deleted.Type, deleted.Amount, deleted.AccountID, deleted.DestinationAccountID)
+	})
 }
 
 // --- balance helpers ---
 
-func (s *TransactionService) applyBalanceChange(ctx context.Context, qtx *db.Queries, txnType model.TransactionType, amount decimal.Decimal, accountID uuid.UUID, destID *uuid.UUID) error {
+func applyBalanceChange(ctx context.Context, accounts repository.AccountRepository, txnType model.TransactionType, amount decimal.Decimal, accountID uuid.UUID, destID *uuid.UUID) error {
 	switch txnType {
 	case model.TransactionTypeIncome:
-		return qtx.UpdateAccountBalance(ctx, db.UpdateAccountBalanceParams{ID: accountID, Balance: amount})
+		return accounts.UpdateBalance(ctx, accountID, amount)
 	case model.TransactionTypeExpense:
-		return qtx.UpdateAccountBalance(ctx, db.UpdateAccountBalanceParams{ID: accountID, Balance: amount.Neg()})
+		return accounts.UpdateBalance(ctx, accountID, amount.Neg())
 	case model.TransactionTypeTransfer:
 		if destID == nil {
 			return ErrTransferMissingDest
 		}
-		if err := qtx.UpdateAccountBalance(ctx, db.UpdateAccountBalanceParams{ID: accountID, Balance: amount.Neg()}); err != nil {
+		if err := accounts.UpdateBalance(ctx, accountID, amount.Neg()); err != nil {
 			return err
 		}
-		return qtx.UpdateAccountBalance(ctx, db.UpdateAccountBalanceParams{ID: *destID, Balance: amount})
+		return accounts.UpdateBalance(ctx, *destID, amount)
 	}
 	return nil
 }
 
-func (s *TransactionService) reverseBalanceChange(ctx context.Context, qtx *db.Queries, txnType model.TransactionType, amount decimal.Decimal, accountID uuid.UUID, destID *uuid.UUID) error {
+func reverseBalanceChange(ctx context.Context, accounts repository.AccountRepository, txnType model.TransactionType, amount decimal.Decimal, accountID uuid.UUID, destID *uuid.UUID) error {
 	switch txnType {
 	case model.TransactionTypeIncome:
-		return qtx.UpdateAccountBalance(ctx, db.UpdateAccountBalanceParams{ID: accountID, Balance: amount.Neg()})
+		return accounts.UpdateBalance(ctx, accountID, amount.Neg())
 	case model.TransactionTypeExpense:
-		return qtx.UpdateAccountBalance(ctx, db.UpdateAccountBalanceParams{ID: accountID, Balance: amount})
+		return accounts.UpdateBalance(ctx, accountID, amount)
 	case model.TransactionTypeTransfer:
 		if destID == nil {
 			return nil
 		}
-		if err := qtx.UpdateAccountBalance(ctx, db.UpdateAccountBalanceParams{ID: accountID, Balance: amount}); err != nil {
+		if err := accounts.UpdateBalance(ctx, accountID, amount); err != nil {
 			return err
 		}
-		return qtx.UpdateAccountBalance(ctx, db.UpdateAccountBalanceParams{ID: *destID, Balance: amount.Neg()})
+		return accounts.UpdateBalance(ctx, *destID, amount.Neg())
 	}
 	return nil
-}
-
-// --- conversion helpers ---
-
-func toTransactionModel(t db.Transaction) model.Transaction {
-	txn := model.Transaction{
-		ID:           t.ID,
-		HouseholdID:  t.HouseholdID,
-		Type:         model.TransactionType(t.Type),
-		Description:  t.Description,
-		Amount:       t.Amount,
-		AccountID:    t.AccountID,
-		Tags:         t.Tags,
-		TransactedAt: t.TransactedAt.Time,
-		CreatedBy:    t.CreatedBy,
-		CreatedAt:    t.CreatedAt.Time,
-		UpdatedAt:    t.UpdatedAt.Time,
-	}
-	if t.Note.Valid {
-		txn.Note = &t.Note.String
-	}
-	txn.DestinationAccountID = nullUUIDToPtr(t.DestinationAccountID)
-	return txn
-}
-
-func toNullUUID(id *uuid.UUID) pgtype.UUID {
-	if id == nil {
-		return pgtype.UUID{}
-	}
-	return pgtype.UUID{Bytes: *id, Valid: true}
-}
-
-func nullUUIDToPtr(nu pgtype.UUID) *uuid.UUID {
-	if !nu.Valid {
-		return nil
-	}
-	id := uuid.UUID(nu.Bytes)
-	return &id
-}
-
-func toPgText(s *string) pgtype.Text {
-	if s == nil {
-		return pgtype.Text{}
-	}
-	return pgtype.Text{String: *s, Valid: true}
-}
-
-func toPgTimestamptz(t *time.Time) pgtype.Timestamptz {
-	if t == nil {
-		return pgtype.Timestamptz{}
-	}
-	return pgtype.Timestamptz{Time: *t, Valid: true}
-}
-
-func toNullTxnType(t *model.TransactionType) pgtype.Text {
-	if t == nil {
-		return pgtype.Text{}
-	}
-	return pgtype.Text{String: string(*t), Valid: true}
 }

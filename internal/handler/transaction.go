@@ -15,11 +15,10 @@ import (
 
 type TransactionHandler struct {
 	txnSvc *service.TransactionService
-	hhSvc  *service.HouseholdService
 }
 
-func NewTransactionHandler(txnSvc *service.TransactionService, hhSvc *service.HouseholdService) *TransactionHandler {
-	return &TransactionHandler{txnSvc: txnSvc, hhSvc: hhSvc}
+func NewTransactionHandler(txnSvc *service.TransactionService) *TransactionHandler {
+	return &TransactionHandler{txnSvc: txnSvc}
 }
 
 // POST /api/transactions
@@ -37,11 +36,6 @@ func (h *TransactionHandler) Create(w http.ResponseWriter, r *http.Request) {
 	userID := middleware.UserIDFromCtx(r.Context())
 	hhID := middleware.HouseholdIDFromCtx(r.Context())
 
-	if err := h.hhSvc.CheckMembership(r.Context(), hhID, userID); err != nil {
-		ErrorJSON(w, http.StatusForbidden, "not a member of this household")
-		return
-	}
-
 	txn, err := h.txnSvc.Create(r.Context(), hhID, userID, req)
 	if err != nil {
 		ErrorJSON(w, http.StatusBadRequest, err.Error())
@@ -52,13 +46,7 @@ func (h *TransactionHandler) Create(w http.ResponseWriter, r *http.Request) {
 
 // GET /api/transactions
 func (h *TransactionHandler) List(w http.ResponseWriter, r *http.Request) {
-	userID := middleware.UserIDFromCtx(r.Context())
 	hhID := middleware.HouseholdIDFromCtx(r.Context())
-
-	if err := h.hhSvc.CheckMembership(r.Context(), hhID, userID); err != nil {
-		ErrorJSON(w, http.StatusForbidden, "not a member of this household")
-		return
-	}
 
 	q := model.ListTransactionsQuery{
 		Limit:  50,

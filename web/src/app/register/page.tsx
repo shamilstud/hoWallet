@@ -27,7 +27,14 @@ export default function RegisterPage() {
         api.setHouseholdId(households[0].id);
       }
 
-      router.push('/dashboard');
+      // Redirect to pending invitation if present
+      const pendingToken = localStorage.getItem('pending_invite_token');
+      if (pendingToken) {
+        localStorage.removeItem('pending_invite_token');
+        router.push(`/invite/${pendingToken}`);
+      } else {
+        router.push('/dashboard');
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Ошибка регистрации');
     } finally {

@@ -14,8 +14,8 @@ import (
 	"github.com/joho/godotenv"
 
 	"github.com/howallet/howallet/internal/config"
-	db "github.com/howallet/howallet/internal/db"
 	"github.com/howallet/howallet/internal/handler"
+	"github.com/howallet/howallet/internal/repository/postgres"
 	"github.com/howallet/howallet/internal/router"
 	"github.com/howallet/howallet/internal/service"
 )
@@ -48,25 +48,26 @@ func main() {
 	}
 	logger.Info("connected to database")
 
-	// Queries (sqlc generated)
-	queries := db.New(pool)
+	// Repository layer
+	repos := postgres.New(pool)
 
-	// Services
-	authSvc := service.NewAuthService(pool, queries, &cfg.JWT)
-	hhSvc := service.NewHouseholdService(pool, queries)
-	accSvc := service.NewAccountService(pool, queries)
-	txnSvc := service.NewTransactionService(pool, queries)
-	exportSvc := service.NewExportService(queries)
+	// Services (repository-based)
+	emailSvc := service.NewEmailService(&cfg.SMTP)
+	authSvc := service.NewAuthService(repos, &cfg.JWT)
+	hhSvc := service.NewHouseholdService(repos, emailSvc, cfg.Frontend.URL)
+	accSvc := service.NewAccountService(repos.Accounts)
+	txnSvc := service.NewTransactionService(repos)
+	exportSvc := service.NewExportService(repos.Transactions)
 
 	// Handlers
 	authH := handler.NewAuthHandler(authSvc)
 	hhH := handler.NewHouseholdHandler(hhSvc)
-	accH := handler.NewAccountHandler(accSvc, hhSvc)
-	txnH := handler.NewTransactionHandler(txnSvc, hhSvc)
-	expH := handler.NewExportHandler(exportSvc, hhSvc)
+	accH := handler.NewAccountHandler(accSvc)
+	txnH := handler.NewTransactionHandler(txnSvc)
+	expH := handler.NewExportHandler(exportSvc)
 
-	// Router
-	mux := router.New(cfg, logger, authH, hhH, accH, txnH, expH)
+	// Router (membership check enforced in HouseholdCtx middleware)
+	mux := router.New(cfg, logger, authH, hhH, accH, txnH, expH, hhSvc.CheckMembership)
 
 	// HTTP Server
 	srv := &http.Server{

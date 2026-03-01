@@ -22,6 +22,7 @@ func New(
 	accH *handler.AccountHandler,
 	txnH *handler.TransactionHandler,
 	expH *handler.ExportHandler,
+	checkMembership mw.MembershipChecker,
 ) http.Handler {
 	r := chi.NewRouter()
 
@@ -65,6 +66,7 @@ func New(
 
 			r.Route("/{id}", func(r chi.Router) {
 				r.Get("/members", hhH.ListMembers)
+				r.Get("/invitations", hhH.ListPendingInvitations)
 				r.Post("/invite", hhH.Invite)
 				r.Delete("/members/{userId}", hhH.RemoveMember)
 			})
@@ -73,9 +75,9 @@ func New(
 		// Accept invitation
 		r.Post("/api/invitations/{token}/accept", hhH.AcceptInvitation)
 
-		// Routes that require X-Household-ID
+		// Routes that require X-Household-ID (membership enforced)
 		r.Group(func(r chi.Router) {
-			r.Use(mw.HouseholdCtx())
+			r.Use(mw.HouseholdCtx(checkMembership))
 
 			// Accounts
 			r.Route("/api/accounts", func(r chi.Router) {

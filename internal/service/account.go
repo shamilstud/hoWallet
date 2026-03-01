@@ -6,11 +6,10 @@ import (
 	"fmt"
 
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/shopspring/decimal"
 
-	db "github.com/howallet/howallet/internal/db"
 	"github.com/howallet/howallet/internal/model"
+	"github.com/howallet/howallet/internal/repository"
 )
 
 var (
@@ -19,12 +18,11 @@ var (
 )
 
 type AccountService struct {
-	queries *db.Queries
-	pool    *pgxpool.Pool
+	accounts repository.AccountRepository
 }
 
-func NewAccountService(pool *pgxpool.Pool, queries *db.Queries) *AccountService {
-	return &AccountService{queries: queries, pool: pool}
+func NewAccountService(accounts repository.AccountRepository) *AccountService {
+	return &AccountService{accounts: accounts}
 }
 
 func (s *AccountService) Create(ctx context.Context, householdID, userID uuid.UUID, req model.CreateAccountRequest) (*model.Account, error) {
@@ -35,13 +33,13 @@ func (s *AccountService) Create(ctx context.Context, householdID, userID uuid.UU
 
 	currency := req.Currency
 	if currency == "" {
-		currency = "KZT"
+		currency = "USD"
 	}
 
-	dbAcc, err := s.queries.CreateAccount(ctx, db.CreateAccountParams{
+	acc, err := s.accounts.Create(ctx, repository.CreateAccountParams{
 		HouseholdID: householdID,
 		Name:        req.Name,
-		Type:        db.AccountType(req.Type),
+		Type:        req.Type,
 		Balance:     balance,
 		Currency:    currency,
 		CreatedBy:   userID,
@@ -50,63 +48,41 @@ func (s *AccountService) Create(ctx context.Context, householdID, userID uuid.UU
 		return nil, fmt.Errorf("create account: %w", err)
 	}
 
-	acc := toAccountModel(dbAcc)
 	return &acc, nil
 }
 
 func (s *AccountService) List(ctx context.Context, householdID uuid.UUID) ([]model.Account, error) {
-	rows, err := s.queries.ListAccountsByHousehold(ctx, householdID)
+	accounts, err := s.accounts.ListByHousehold(ctx, householdID)
 	if err != nil {
 		return nil, fmt.Errorf("list accounts: %w", err)
-	}
-
-	accounts := make([]model.Account, 0, len(rows))
-	for _, r := range rows {
-		accounts = append(accounts, toAccountModel(r))
 	}
 	return accounts, nil
 }
 
 func (s *AccountService) Get(ctx context.Context, id, householdID uuid.UUID) (*model.Account, error) {
-	dbAcc, err := s.queries.GetAccount(ctx, db.GetAccountParams{
-		ID:          id,
-		HouseholdID: householdID,
-	})
+	acc, err := s.accounts.GetByID(ctx, id, householdID)
 	if err != nil {
 		return nil, ErrAccountNotFound
 	}
-	acc := toAccountModel(dbAcc)
 	return &acc, nil
 }
 
 func (s *AccountService) Update(ctx context.Context, id, householdID uuid.UUID, req model.UpdateAccountRequest) (*model.Account, error) {
-	params := db.UpdateAccountParams{
+	acc, err := s.accounts.Update(ctx, repository.UpdateAccountParams{
 		ID:          id,
 		HouseholdID: householdID,
-	}
-
-	if req.Name != nil {
-		params.Name = req.Name
-	}
-	if req.Type != nil {
-		t := db.AccountType(*req.Type)
-		params.Type = &t
-	}
-	if req.Currency != nil {
-		params.Currency = req.Currency
-	}
-
-	dbAcc, err := s.queries.UpdateAccount(ctx, params)
+		Name:        req.Name,
+		Type:        req.Type,
+		Currency:    req.Currency,
+	})
 	if err != nil {
 		return nil, ErrAccountNotFound
 	}
-
-	acc := toAccountModel(dbAcc)
 	return &acc, nil
 }
 
 func (s *AccountService) Delete(ctx context.Context, id, householdID uuid.UUID) error {
-	count, err := s.queries.CountTransactionsByAccount(ctx, id)
+	count, err := s.accounts.CountTransactions(ctx, id)
 	if err != nil {
 		return fmt.Errorf("count transactions: %w", err)
 	}
@@ -114,22 +90,5 @@ func (s *AccountService) Delete(ctx context.Context, id, householdID uuid.UUID) 
 		return ErrAccountHasTransactions
 	}
 
-	return s.queries.DeleteAccount(ctx, db.DeleteAccountParams{
-		ID:          id,
-		HouseholdID: householdID,
-	})
-}
-
-func toAccountModel(a db.Account) model.Account {
-	return model.Account{
-		ID:          a.ID,
-		HouseholdID: a.HouseholdID,
-		Name:        a.Name,
-		Type:        model.AccountType(a.Type),
-		Balance:     a.Balance,
-		Currency:    a.Currency,
-		CreatedBy:   a.CreatedBy,
-		CreatedAt:   a.CreatedAt.Time,
-		UpdatedAt:   a.UpdatedAt.Time,
-	}
+	return s.accounts.Delete(ctx, id, householdID)
 }

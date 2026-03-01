@@ -80,7 +80,7 @@ CREATE TABLE accounts (
     name         VARCHAR(255) NOT NULL,
     type         account_type NOT NULL DEFAULT 'card',
     balance      DECIMAL(19, 4) NOT NULL DEFAULT 0,
-    currency     VARCHAR(3)  NOT NULL DEFAULT 'UAH',
+    currency     VARCHAR(3)  NOT NULL DEFAULT 'USD',
     created_by   UUID NOT NULL REFERENCES users (id) ON DELETE SET NULL,
     created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at   TIMESTAMPTZ NOT NULL DEFAULT now()

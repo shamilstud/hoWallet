@@ -153,3 +153,25 @@ func (h *HouseholdHandler) RemoveMember(w http.ResponseWriter, r *http.Request) 
 	}
 	JSON(w, http.StatusOK, map[string]string{"message": "member removed"})
 }
+
+// GET /api/households/{id}/invitations
+func (h *HouseholdHandler) ListPendingInvitations(w http.ResponseWriter, r *http.Request) {
+	hhID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		ErrorJSON(w, http.StatusBadRequest, "invalid household id")
+		return
+	}
+
+	userID := middleware.UserIDFromCtx(r.Context())
+	if err := h.hhSvc.CheckMembership(r.Context(), hhID, userID); err != nil {
+		ErrorJSON(w, http.StatusForbidden, "not a member")
+		return
+	}
+
+	invitations, err := h.hhSvc.ListPendingInvitations(r.Context(), hhID)
+	if err != nil {
+		ErrorJSON(w, http.StatusInternalServerError, "failed to list invitations")
+		return
+	}
+	JSON(w, http.StatusOK, invitations)
+}

@@ -11,22 +11,15 @@ import (
 
 type ExportHandler struct {
 	exportSvc *service.ExportService
-	hhSvc     *service.HouseholdService
 }
 
-func NewExportHandler(exportSvc *service.ExportService, hhSvc *service.HouseholdService) *ExportHandler {
-	return &ExportHandler{exportSvc: exportSvc, hhSvc: hhSvc}
+func NewExportHandler(exportSvc *service.ExportService) *ExportHandler {
+	return &ExportHandler{exportSvc: exportSvc}
 }
 
 // GET /api/export/csv
 func (h *ExportHandler) ExportCSV(w http.ResponseWriter, r *http.Request) {
-	userID := middleware.UserIDFromCtx(r.Context())
 	hhID := middleware.HouseholdIDFromCtx(r.Context())
-
-	if err := h.hhSvc.CheckMembership(r.Context(), hhID, userID); err != nil {
-		ErrorJSON(w, http.StatusForbidden, "not a member of this household")
-		return
-	}
 
 	var from, to *time.Time
 	if v := r.URL.Query().Get("from"); v != "" {
